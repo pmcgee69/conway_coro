@@ -7,44 +7,11 @@ use std::time::{Duration, Instant};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+mod grid;      // Grid types and union
 mod ui;        // Your existing ui.rs module
 mod patterns;  // Your existing patterns.rs module
 
-type TRow = [bool; 52];
-type TGrid = [TRow; 52];
-
-// Union to view grid as either rows or flat vector
-#[repr(C)]
-union GridUnion {
-    as_rows: TGrid,
-    as_vector: [bool; 52 * 52],  // 2704 elements
-}
-
-impl GridUnion {
-    fn new() -> Self {
-        GridUnion {
-            as_rows: [[false; 52]; 52]
-        }
-    }
-    
-    fn as_grid(&self) -> &TGrid {
-        unsafe { &self.as_rows }
-    }
-    
-    fn as_grid_mut(&mut self) -> &mut TGrid {
-        unsafe { &mut self.as_rows }
-    }
-    
-    fn as_vector_mut(&mut self) -> &mut [bool; 52 * 52] {
-        unsafe { &mut self.as_vector }
-    }
-}
-
-// Cargo.toml dependencies needed:
-// [dependencies]
-// eframe = "0.24"
-// egui = "0.24"
-// tokio = { version = "1.0", features = ["full"] }
+use grid::{TGrid, GridUnion};
 
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
