@@ -6,13 +6,39 @@ use egui::Color32;
 use std::time::{Duration, Instant};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
-use tokio::sync::{RwLock, Notify};
 
 mod ui;        // Your existing ui.rs module
 mod patterns;  // Your existing patterns.rs module
 
-type TGrid = [[bool; 52]; 52];
+type TRow = [bool; 52];
+type TGrid = [TRow; 52];
+
+// Union to view grid as either rows or flat vector
+#[repr(C)]
+union GridUnion {
+    as_rows: TGrid,
+    as_vector: [bool; 52 * 52],  // 2704 elements
+}
+
+impl GridUnion {
+    fn new() -> Self {
+        GridUnion {
+            as_rows: [[false; 52]; 52]
+        }
+    }
+    
+    fn as_grid(&self) -> &TGrid {
+        unsafe { &self.as_rows }
+    }
+    
+    fn as_grid_mut(&mut self) -> &mut TGrid {
+        unsafe { &mut self.as_rows }
+    }
+    
+    fn as_vector_mut(&mut self) -> &mut [bool; 52 * 52] {
+        unsafe { &mut self.as_vector }
+    }
+}
 
 // Cargo.toml dependencies needed:
 // [dependencies]
@@ -20,8 +46,7 @@ type TGrid = [[bool; 52]; 52];
 // egui = "0.24"
 // tokio = { version = "1.0", features = ["full"] }
 
-#[tokio::main]
-async fn main() -> Result<(), eframe::Error> {
+fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([800.0, 950.0]),
@@ -35,71 +60,50 @@ async fn main() -> Result<(), eframe::Error> {
     )
 }
 
-/// Row coroutine that processes cells cooperatively
+/// Row coroutine that processes cells cooperatively - now lock-free!
 async fn row_coroutine(
     row_index: usize,
-    current_grid: Arc<RwLock<TGrid>>,
-    next_grid: Arc<RwLock<TGrid>>,
-    generation_sync: Arc<Notify>,
+    current_grid: &TGrid,           // Simple reference - no locking!
+    my_row_slice: &mut [bool],      // Direct mutable slice - no Arc/Mutex!
 ) {
-    loop {
-        // Process all cells in this row
-        for col in 1..=50 {
-            // Read current grid state
-            let grid = current_grid.read().await;
-            
-            // Count neighbors using baked-in coordinates (same logic as original)
-            let mut count = 0;
-            let neighbors = [
-                (row_index-1, col-1), (row_index-1, col), (row_index-1, col+1),
-                (row_index, col-1),                        (row_index, col+1),
-                (row_index+1, col-1), (row_index+1, col), (row_index+1, col+1)
-            ];
-            
-            for &(nr, nc) in &neighbors {
-                if grid[nr][nc] { count += 1; }
-            }
-            
-            let current_alive = grid[row_index][col];
-            drop(grid); // Release read lock
-            
-            // Apply Conway's rules (same as original)
-            let next_state = match (current_alive, count) {
-                (true, 2) | (true, 3) => true,   // Survival
-                (false, 3)            => true,   // Birth
-                _                     => false,  // Death or stays dead
-            };
-            
-            // Write to next grid
-            {
-                let mut next = next_grid.write().await;
-                next[row_index][col] = next_state;
-            }
-            
-            // Yield after each cell for cooperative scheduling
-            tokio::task::yield_now().await;
+    // Process all cells in this row
+    for col in 1..=50 {
+        // Count neighbors using direct grid access
+        let mut count = 0;
+        let neighbors = [
+            (row_index-1, col-1), (row_index-1, col), (row_index-1, col+1),
+            (row_index, col-1),                        (row_index, col+1),
+            (row_index+1, col-1), (row_index+1, col), (row_index+1, col+1)
+        ];
+        
+        for &(nr, nc) in &neighbors {
+            if current_grid[nr][nc] { count += 1; }
         }
         
-        // Wait for all rows to complete before next generation
-        generation_sync.notified().await;
+        let current_alive = current_grid[row_index][col];
+        
+        // Apply Conway's rules
+        let next_state = match (current_alive, count) {
+            (true, 2) | (true, 3) => true,   // Survival
+            (false, 3)            => true,   // Birth
+            _                     => false,  // Death or stays dead
+        };
+        
+        // Write directly to my exclusive row slice - no locking!
+        my_row_slice[col] = next_state;
+        
+        // Yield after each cell for cooperative scheduling
+        tokio::task::yield_now().await;
     }
+    
+    // No sync needed - coroutine completes and terminates
 }
 
-/// Factory function that creates and spawns row coroutines
-fn spawn_row_coroutine(
-    row_index: usize,
-    current_grid: Arc<RwLock<TGrid>>,
-    next_grid: Arc<RwLock<TGrid>>,
-    generation_sync: Arc<Notify>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(row_coroutine(row_index, current_grid, next_grid, generation_sync))
-}
-
-/// Async Conway's Game of Life - maintains same interface as original for UI compatibility
+/// Async Conway's Game of Life - lock-free version
 pub struct GameOfLife {
-    // Grid state - now async-shared
-    current_grid: Arc<RwLock<TGrid>>,
-    next_grid: Arc<RwLock<TGrid>>,
+    // Grid state - no more Arc/RwLock/Mutex!
+    current_grid: GridUnion,
+    next_grid: GridUnion,
     
     // Keep same fields as original for UI compatibility
     pub grid: TGrid,  // Cached copy for UI rendering
@@ -112,8 +116,7 @@ pub struct GameOfLife {
     pub selected_pattern: usize,
     
     // Async runtime components
-    generation_sync: Arc<Notify>,
-    runtime: Option<tokio::runtime::Handle>,
+    runtime: tokio::runtime::Runtime,
     
     // Cycle detection (same as original)
     grid_history: [u64; 10],
@@ -122,23 +125,12 @@ pub struct GameOfLife {
 
 impl Default for GameOfLife {
     fn default() -> Self {
-        let current_grid = Arc::new(RwLock::new([[false; 52]; 52]));
-        let next_grid = Arc::new(RwLock::new([[false; 52]; 52]));
-        let generation_sync = Arc::new(Notify::new());
-        
-        // Spawn 50 row coroutines (one per row from 1 to 50)
-        for row in 1..=50 {
-            spawn_row_coroutine(
-                row,
-                current_grid.clone(),
-                next_grid.clone(),
-                generation_sync.clone(),
-            );
-        }
+        // Create tokio runtime for coroutines
+        let runtime = tokio::runtime::Runtime::new().unwrap();
         
         Self {
-            current_grid,
-            next_grid,
+            current_grid: GridUnion::new(),
+            next_grid: GridUnion::new(),
             grid: [[false; 52]; 52],  // Cached copy for UI
             is_running: false,
             last_update: Instant::now(),
@@ -147,8 +139,7 @@ impl Default for GameOfLife {
             live_color: Color32::from_rgb(0, 200, 0),
             dead_color: Color32::from_rgb(40, 40, 40),
             selected_pattern: 0,
-            generation_sync,
-            runtime: None,
+            runtime,
             grid_history: [0; 10],
             history_count: 0,
         }
@@ -167,50 +158,54 @@ pub trait GameOfLifeInterface {
 
 impl GameOfLifeInterface for GameOfLife {
     fn update_generation(&mut self) {
-        // Initialize runtime handle on first call
-        if self.runtime.is_none() {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                self.runtime = Some(handle);
-            } else {
-                // Fallback: create a new runtime if none exists
-                eprintln!("Warning: No tokio runtime found, async features disabled");
-                return;
-            }
-        }
-        
-        if let Some(handle) = &self.runtime {
-            // Use block_on to bridge async/sync gap for eframe
-            handle.block_on(async {
-                // Clear the next grid first
-                {
-                    let mut next = self.next_grid.write().await;
-                    *next = [[false; 52]; 52];
-                }
-                
-                // Signal all row coroutines to start processing this generation
-                self.generation_sync.notify_waiters();
-                
-                // Give coroutines time to process their rows
-                // Since calculations are much faster than rendering, this should be quick
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                
-                // Swap grids (next becomes current)
-                {
-                    let mut current = self.current_grid.write().await;
-                    let mut next = self.next_grid.write().await;
-                    std::mem::swap(&mut *current, &mut *next);
-                    
-                    // Update cached copy for UI rendering
-                    self.grid = *current;
-                }
-                
-                self.generation += 1;
-            });
+        // Use block_on to run async code in sync context (as you intended)
+        self.runtime.block_on(async {
+            // Clear the next grid first
+            *self.next_grid.as_grid_mut() = [[false; 52]; 52];
             
-            // Check for cycles and pause if detected (same as original)
-            if self.check_for_cycle() {
-                self.is_running = false;
+            // Get the flat vector view and split it into non-overlapping slices
+            let current_grid_ref = unsafe { &*(&self.current_grid.as_rows as *const TGrid) };
+            let next_vector = self.next_grid.as_vector_mut();
+            
+            // Split the vector into 52 row slices (each 52 elements)
+            let mut row_slices = Vec::new();
+            for row in 0..52 {
+                let start = row * 52;
+                let end = start + 52;
+                let row_slice = &mut next_vector[start..end];
+                row_slices.push(row_slice as *mut [bool]);
             }
+            
+            // Spawn 50 row coroutines with direct slice access
+            let mut handles = Vec::new();
+            for row in 1..=50 {
+                let my_row_slice = unsafe { &mut *row_slices[row] };
+                
+                let handle = tokio::spawn(row_coroutine(
+                    row,
+                    current_grid_ref,       // Direct reference - no Arc!
+                    my_row_slice,           // Direct mutable slice - no Mutex!
+                ));
+                handles.push(handle);
+            }
+            
+            // Wait for all row coroutines to complete
+            for handle in handles {
+                handle.await.unwrap();
+            }
+            
+            // Swap grids - simple memory swap
+            std::mem::swap(&mut self.current_grid, &mut self.next_grid);
+            
+            // Update cached copy for UI rendering
+            self.grid = *self.current_grid.as_grid();
+            
+            self.generation += 1;
+        });
+        
+        // Check for cycles and pause if detected (same as original)
+        if self.check_for_cycle() {
+            self.is_running = false;
         }
     }
     
@@ -237,15 +232,8 @@ impl GameOfLifeInterface for GameOfLife {
     }
     
     fn clear_grid(&mut self) {
-        if let Some(handle) = &self.runtime {
-            handle.block_on(async {
-                let mut current = self.current_grid.write().await;
-                *current = [[false; 52]; 52];
-                self.grid = *current; // Update cached copy
-            });
-        } else {
-            self.grid = [[false; 52]; 52];
-        }
+        *self.current_grid.as_grid_mut() = [[false; 52]; 52];
+        self.grid = *self.current_grid.as_grid(); // Update cached copy
         self.generation = 0;
         self.grid_history = [0; 10];  // Reset array to zeros
         self.history_count = 0;       // Reset counter
@@ -253,15 +241,8 @@ impl GameOfLifeInterface for GameOfLife {
     
     fn apply_selected_pattern(&mut self) {
         if let Some(pattern) = patterns::PATTERNS.get(self.selected_pattern) {
-            if let Some(handle) = &self.runtime {
-                handle.block_on(async {
-                    let mut current = self.current_grid.write().await;
-                    patterns::apply_pattern(&mut *current, pattern);
-                    self.grid = *current; // Update cached copy
-                });
-            } else {
-                patterns::apply_pattern(&mut self.grid, pattern);
-            }
+            patterns::apply_pattern(self.current_grid.as_grid_mut(), pattern);
+            self.grid = *self.current_grid.as_grid(); // Update cached copy
             self.generation = 0;
             self.grid_history = [0; 10];  // Reset array to zeros
             self.history_count = 0;       // Reset counter
@@ -280,18 +261,11 @@ impl GameOfLifeInterface for GameOfLife {
     }
 }
 
-// Additional async-specific methods for pattern operations
+// Additional async-specific methods for UI compatibility
 impl GameOfLife {
     pub fn apply_random_pattern_async(&mut self) {
-        if let Some(handle) = &self.runtime {
-            handle.block_on(async {
-                let mut current = self.current_grid.write().await;
-                patterns::apply_random_pattern(&mut *current, self.generation);
-                self.grid = *current; // Update cached copy
-            });
-        } else {
-            patterns::apply_random_pattern(&mut self.grid, self.generation);
-        }
+        patterns::apply_random_pattern(self.current_grid.as_grid_mut(), self.generation);
+        self.grid = *self.current_grid.as_grid(); // Update cached copy
         self.generation = 0;
         self.grid_history = [0; 10];
         self.history_count = 0;
@@ -299,15 +273,8 @@ impl GameOfLife {
     
     pub fn toggle_cell_async(&mut self, row: usize, col: usize) {
         if row >= 1 && row <= 50 && col >= 1 && col <= 50 {
-            if let Some(handle) = &self.runtime {
-                handle.block_on(async {
-                    let mut current = self.current_grid.write().await;
-                    current[row][col] = !current[row][col];
-                    self.grid = *current; // Update cached copy
-                });
-            } else {
-                self.grid[row][col] = !self.grid[row][col];
-            }
+            self.current_grid.as_grid_mut()[row][col] = !self.current_grid.as_grid()[row][col];
+            self.grid = *self.current_grid.as_grid(); // Update cached copy
         }
     }
 }
