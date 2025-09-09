@@ -643,6 +643,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "conway"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "winapi",
+]
+
+[[package]]
 name = "conway_coro"
 version = "0.1.0"
 dependencies = [
@@ -1248,10 +1257,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "grid_display"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "winapi",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
+
+[[package]]
+name = "hello_world"
+version = "0.1.0"
 
 [[package]]
 name = "hermit-abi"

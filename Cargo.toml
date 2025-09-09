@@ -1,9 +1,14 @@
-[package]
-name    = "conway_coro"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "conway",
+    "conway_coro_", 
+    "grid_display",
+    "hello_world"
+]
+resolver = "2"
 
-[dependencies]
+# Optional: shared dependencies
+[workspace.dependencies]
 eframe  = "0.24"
 egui    = "0.24"
 tokio   = { version = "1.0", features = ["full"] }

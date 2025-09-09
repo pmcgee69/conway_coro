@@ -11,7 +11,7 @@ mod grid;      // Grid types
 mod ui;        // Your existing ui.rs module
 mod patterns;  // Your existing patterns.rs module
 
-use grid::{TGrid, GRID_START, GRID_END, TOTAL_SIZE};
+use grid::{TGrid, GRID_START, GRID_END, GRID_SIZE, TOTAL_SIZE};
 
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
@@ -30,15 +30,10 @@ fn main() -> Result<(), eframe::Error> {
 /// Factory function that creates time-sliced row coroutine closures
 fn create_time_sliced_row_coroutine(row_index: usize) -> impl FnMut(TGrid, Duration) -> std::pin::Pin<Box<dyn std::future::Future<Output = (bool, [bool; TOTAL_SIZE])>>> {
     let mut current_col = GRID_START;
-    //let mut completed = false;
     let mut result = [false; TOTAL_SIZE];
     
     move |current_grid: TGrid, time_budget: Duration| {
         Box::pin(async move {
-            //if completed {
-            //    return (true, result);
-            //}
-            
             let start = Instant::now();
             
             while current_col < GRID_END {
@@ -73,13 +68,9 @@ fn create_time_sliced_row_coroutine(row_index: usize) -> impl FnMut(TGrid, Durat
                 current_col += 1;
             }
             
-            // Check if row is complete
-            if current_col >= GRID_END {
-                //completed = true;
-                (true, result)
-            } else {
-                (false, result)
-            }
+            // Check if row is complete - just return the status
+            let is_complete = current_col >= GRID_END;
+            (is_complete, result)
         })
     }
 }
@@ -204,17 +195,21 @@ pub trait GameOfLifeInterface {
 
 impl GameOfLifeInterface for GameOfLife {
     fn update_generation(&mut self) {
-        // Update time slice if changed
+        // Calculate adaptive time slice based on frame rate: (1/fps)/(N*10)
+        let fps = 1000.0 / self.update_interval.as_millis() as f32;
+        self.time_slice_ms = (1.0 / fps) / (GRID_SIZE as f32 * 10.0) * 1000.0;
+        
         let time_budget = Duration::from_millis(self.time_slice_ms as u64);
         self.generation_processor.set_time_budget(time_budget);
         
         self.runtime.block_on(async {
             // Process generation with time-sliced coroutines
-            let next_grid = self.generation_processor.process_generation(self.current_grid).await;
+            let (next_grid, any_incomplete) = self.generation_processor.process_generation(self.current_grid).await;
             
             self.current_grid = next_grid;
             self.grid = self.current_grid;
             self.generation += 1;
+            self.incomplete_coroutines = any_incomplete;  // Track incomplete coroutines for UI
         });
         
         if self.check_for_cycle() { self.is_running = false; }
