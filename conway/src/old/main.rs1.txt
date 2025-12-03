@@ -1,0 +1,320 @@
+
+use eframe::egui;
+use egui::{Color32, Rect, Stroke, Vec2};
+use std::time::{Duration, Instant};
+
+fn main() -> Result<(), eframe::Error> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([800.0, 950.0]),
+        ..Default::default()
+    };
+    
+    eframe::run_native(
+        "Conway's Game of Life",
+        options,
+        Box::new(|_cc| Box::new(GameOfLife::default())),
+    )
+}
+
+struct GameOfLife {
+    grid: [[bool; 52]; 52],  // 0-51 grid with border
+    next_grid: [[bool; 52]; 52],
+    is_running: bool,
+    last_update: Instant,
+    update_interval: Duration,
+    generation: u32,
+    live_color: Color32,
+    dead_color: Color32,
+    show_color_picker: bool,
+    picking_live: bool,
+}
+
+impl Default for GameOfLife {
+    fn default() -> Self {
+        Self {
+            grid: [[false; 52]; 52],  // All cells start dead (including border)
+            next_grid: [[false; 52]; 52],
+            is_running: false,
+            last_update: Instant::now(),
+            update_interval: Duration::from_millis(200), // 5 updates per second
+            generation: 0,
+            live_color: Color32::from_rgb(0, 200, 0), // Green for alive
+            dead_color: Color32::from_rgb(40, 40, 40), // Dark gray for dead
+            show_color_picker: false,
+            picking_live: true,
+        }
+    }
+}
+
+impl GameOfLife {
+    fn count_live_neighbors(&self, row: usize, col: usize) -> u8 {
+        let mut count = 0;
+        
+        for dr in 0..3 {
+            for dc in 0..3 {
+                if dr == 1 && dc == 1 {
+                    continue; // Skip the cell itself (center of 3x3)
+                }
+                
+                // Calculate neighbor position (no bounds checking needed with border)
+                let neighbor_row = row + dr - 1;
+                let neighbor_col = col + dc - 1;
+                
+                if self.grid[neighbor_row][neighbor_col] {
+                    count += 1;
+                }
+            }
+        }
+        
+        count
+    }
+    
+    fn update_generation(&mut self) {
+        // Calculate next generation for the active area (1-50)
+        for row in 1..51 {
+            for col in 1..51 {
+                let live_neighbors = self.count_live_neighbors(row, col);
+                let is_alive = self.grid[row][col];
+                
+                // Conway's Game of Life rules:
+                // 1. Any live cell with 2 or 3 live neighbors survives
+                // 2. Any dead cell with exactly 3 live neighbors becomes alive
+                // 3. All other live cells die, all other dead cells stay dead
+                self.next_grid[row][col] = match (is_alive, live_neighbors) {
+                    (true, 2) | (true, 3) => true,  // Survival
+                    (false, 3) => true,             // Birth
+                    _ => false,                     // Death or stays dead
+                };
+            }
+        }
+        
+        // Assert that border cells remain dead (error checking)
+        for i in 0..52 {
+            assert_eq!(self.next_grid[0][i], false, "Top border cell [{}, {}] should be false", 0, i);
+            assert_eq!(self.next_grid[51][i], false, "Bottom border cell [{}, {}] should be false", 51, i);
+            assert_eq!(self.next_grid[i][0], false, "Left border cell [{}, {}] should be false", i, 0);
+            assert_eq!(self.next_grid[i][51], false, "Right border cell [{}, {}] should be false", i, 51);
+        }
+        
+        // Copy next generation to current
+        self.grid = self.next_grid;
+        self.generation += 1;
+    }
+    
+    fn clear_grid(&mut self) {
+        self.grid = [[false; 52]; 52];
+        self.generation = 0;
+    }
+    
+    fn random_pattern(&mut self) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        // Clear everything first
+        self.grid = [[false; 52]; 52];
+        
+        // Simple pseudo-random generator
+        let mut hasher = DefaultHasher::new();
+        self.generation.hash(&mut hasher);
+        let mut seed = hasher.finish();
+        
+        // Only fill the active area (1-50)
+        for row in 1..51 {
+            for col in 1..51 {
+                seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+                self.grid[row][col] = (seed % 3) == 0; // ~33% chance of being alive
+            }
+        }
+        self.generation = 0;
+    }
+    
+    fn glider_pattern(&mut self) {
+        self.clear_grid();
+        // Create a glider pattern at position (5, 5) - but now in 1-50 range
+        let glider = [
+            (6, 7), (7, 8), (8, 6), (8, 7), (8, 8)  // Shifted by +1 for new coordinate system
+        ];
+        
+        for &(row, col) in &glider {
+            if row >= 1 && row <= 50 && col >= 1 && col <= 50 {
+                self.grid[row][col] = true;
+            }
+        }
+    }
+}
+
+impl eframe::App for GameOfLife {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Auto-update if running
+        if self.is_running && self.last_update.elapsed() >= self.update_interval {
+            self.update_generation();
+            self.last_update = Instant::now();
+            ctx.request_repaint(); // Ensure continuous updates
+        }
+        
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Conway's Game of Life");
+            
+            // Controls
+            ui.horizontal(|ui| {
+                let button_text = if self.is_running { "⏸ Pause" } else { "▶ Start" };
+                if ui.button(button_text).clicked() {
+                    self.is_running = !self.is_running;
+                    if self.is_running {
+                        self.last_update = Instant::now();
+                    }
+                }
+                
+                if ui.button("⏹ Clear").clicked() {
+                    self.is_running = false;
+                    self.clear_grid();
+                }
+                
+                if ui.button("🎲 Random").clicked() {
+                    self.is_running = false;
+                    self.random_pattern();
+                }
+                
+                if ui.button("🔄 Glider").clicked() {
+                    self.is_running = false;
+                    self.glider_pattern();
+                }
+                
+                ui.separator();
+                
+                ui.label(format!("Generation: {}", self.generation));
+            });
+            
+            ui.separator();
+            
+            // Speed control
+            ui.horizontal(|ui| {
+                ui.label("Speed:");
+                let mut speed = 1000.0 / self.update_interval.as_millis() as f32;
+                if ui.add(egui::Slider::new(&mut speed, 0.5..=10.0).suffix(" gen/sec")).changed() {
+                    self.update_interval = Duration::from_millis((1000.0 / speed) as u64);
+                }
+                
+                ui.separator();
+                
+                if ui.button("Choose Live Color").clicked() {
+                    self.show_color_picker = true;
+                    self.picking_live = true;
+                }
+                
+                if ui.button("Choose Dead Color").clicked() {
+                    self.show_color_picker = true;
+                    self.picking_live = false;
+                }
+                
+                // Show current colors
+                ui.label("Live:");
+                ui.color_edit_button_srgba(&mut self.live_color);
+                ui.label("Dead:");
+                ui.color_edit_button_srgba(&mut self.dead_color);
+            });
+            
+            // Color picker window
+            if self.show_color_picker {
+                let mut open = true;
+                egui::Window::new("Color Picker")
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        ui.label(if self.picking_live { "Pick Live Cell Color" } else { "Pick Dead Cell Color" });
+                        
+                        let color_to_edit = if self.picking_live { &mut self.live_color } else { &mut self.dead_color };
+                        
+                        ui.color_edit_button_srgba(color_to_edit);
+                        
+                        if ui.button("Done").clicked() {
+                            self.show_color_picker = false;
+                        }
+                    });
+                
+                if !open {
+                    self.show_color_picker = false;
+                }
+            }
+            
+            ui.separator();
+            
+            // Instructions
+            ui.label("Click cells to toggle them alive/dead. Use Start/Pause to run the simulation.");
+            
+            ui.separator();
+            
+            // Draw the grid (only show the active 50x50 area)
+            let box_size = 15.0;
+            let spacing = 0.5;
+            let grid_size = 50;  // Display size stays 50x50
+            
+            let start_pos = ui.cursor().min;
+            let total_size = Vec2::splat((box_size + spacing) * grid_size as f32 - spacing);
+            
+            let (response, painter) = ui.allocate_painter(total_size, egui::Sense::click());
+            
+            // Fill background
+            painter.rect_filled(
+                Rect::from_min_size(start_pos, total_size),
+                0.0,
+                Color32::BLACK,
+            );
+            
+            // Draw only the active area (grid[1..51][1..51])
+            for display_row in 0..grid_size {
+                for display_col in 0..grid_size {
+                    let grid_row = display_row + 1;  // Map to grid[1..51]
+                    let grid_col = display_col + 1;  // Map to grid[1..51]
+                    
+                    let x = start_pos.x + display_col as f32 * (box_size + spacing);
+                    let y = start_pos.y + display_row as f32 * (box_size + spacing);
+                    
+                    let rect = Rect::from_min_size(
+                        egui::pos2(x, y),
+                        Vec2::splat(box_size),
+                    );
+                    
+                    // Choose color based on cell state
+                    let cell_color = if self.grid[grid_row][grid_col] {
+                        self.live_color
+                    } else {
+                        self.dead_color
+                    };
+                    
+                    painter.rect_filled(rect, 1.0, cell_color);
+                    
+                    // Draw subtle border
+                    painter.rect_stroke(rect, 1.0, Stroke::new(0.2, Color32::from_gray(60)));
+                    
+                    // Handle clicking (only when not running)
+                    if !self.is_running && response.clicked() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            if rect.contains(pos) {
+                                self.grid[grid_row][grid_col] = !self.grid[grid_row][grid_col];
+                            }
+                        }
+                    }
+                }
+            }
+            
+            ui.separator();
+            
+            // Statistics (count only the active area)
+            let live_cells: usize = (1..51).map(|row| 
+                (1..51).filter(|&col| self.grid[row][col]).count()
+            ).sum();
+            
+            ui.horizontal(|ui| {
+                ui.label(format!("Live cells: {}", live_cells));
+                ui.label(format!("Dead cells: {}", 2500 - live_cells));
+                ui.label(format!("Population: {:.1}%", (live_cells as f32 / 2500.0) * 100.0));
+            });
+        });
+        
+        // Request repaint if running to keep animation smooth
+        if self.is_running {
+            ctx.request_repaint();
+        }
+    }
+}

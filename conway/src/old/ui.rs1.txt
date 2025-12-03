@@ -1,0 +1,67 @@
+use eframe::egui;
+use egui::{Color32, Rect, Stroke, Vec2};
+use crate::{GameOfLife, TGrid, patterns};
+use std::time::{Duration, Instant};
+
+impl eframe::App for GameOfLife {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Auto-update if running
+        if self.is_running && self.last_update.elapsed() >= self.update_interval {
+            self.update_generation();
+            self.last_update = Instant::now();
+            ctx.request_repaint();
+        }
+        
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Conway's Game of Life");
+            
+            // Controls
+            ui.horizontal(|ui| {
+                let button_text = if self.is_running { "⏸ Pause" } else { "▶ Start" };
+                if ui.button(button_text).clicked() {
+                    self.is_running = !self.is_running;
+                    if self.is_running {
+                        self.last_update = Instant::now();
+                    }
+                }
+                
+                if ui.button("⏹ Clear").clicked() {
+                    self.is_running = false;
+                    self.clear_grid();
+                }
+                
+                if ui.button("🎲 Random").clicked() {
+                    self.is_running = false;
+                    self.random_pattern();
+                }
+                
+                ui.separator();
+                
+                // Pattern dropdown
+                ui.label("Pattern:");
+                egui::ComboBox::from_id_source("pattern_selector")
+                    .selected_text(patterns::PATTERNS[self.selected_pattern].name)
+                    .show_ui(ui, |ui| {
+                        for (i, pattern) in patterns::PATTERNS.iter().enumerate() {
+                            ui.selectable_value(&mut self.selected_pattern, i, pattern.name);
+                        }
+                    });
+                
+                if ui.button("Apply Pattern").clicked() {
+                    self.is_running = false;
+                    self.apply_selected_pattern();
+                }
+                
+                ui.separator();
+                
+                ui.label(format!("Generation: {}", self.generation));
+            });
+            
+            // ... rest of the UI code stays the same ...
+        });
+        
+        if self.is_running {
+            ctx.request_repaint();
+        }
+    }
+}

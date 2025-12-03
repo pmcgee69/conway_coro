@@ -1,0 +1,8 @@
+[target.x86_64-pc-windows-gnu]
+linker = "D:\\mwgcc\\w64devkit\\bin\\x86_64-w64-mingw32-gcc.exe"
+ar     = "D:\\mwgcc\\w64devkit\\bin\\x86_64-w64-mingw32-ar.exe"
+
+[build]
+target = "x86_64-pc-windows-gnu"
+
+
